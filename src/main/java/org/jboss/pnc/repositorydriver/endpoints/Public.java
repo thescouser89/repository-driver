@@ -86,7 +86,9 @@ public class Public {
     @Authenticated
     @PUT
     @Path("/promote")
-    public void promote(RepositoryPromoteRequest promoteRequest, @QueryParam("seal") @DefaultValue("false") boolean seal) throws RepositoryDriverException {
+    public void promote(
+            RepositoryPromoteRequest promoteRequest,
+            @QueryParam("seal") @DefaultValue("false") boolean seal) throws RepositoryDriverException {
         logger.info("Requested promotion: {}", promoteRequest.getBuildContentId());
         driver.promote(seal, promoteRequest);
     }
