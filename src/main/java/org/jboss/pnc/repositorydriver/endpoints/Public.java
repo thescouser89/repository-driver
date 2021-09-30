@@ -20,20 +20,24 @@ package org.jboss.pnc.repositorydriver.endpoints;
 
 import javax.inject.Inject;
 import javax.ws.rs.Consumes;
+import javax.ws.rs.DefaultValue;
 import javax.ws.rs.GET;
 import javax.ws.rs.POST;
 import javax.ws.rs.PUT;
 import javax.ws.rs.Path;
 import javax.ws.rs.PathParam;
 import javax.ws.rs.Produces;
+import javax.ws.rs.QueryParam;
 import javax.ws.rs.core.MediaType;
 
 import io.quarkus.security.Authenticated;
+import org.jboss.pnc.api.repositorydriver.dto.ArchiveRequest;
 import org.jboss.pnc.api.repositorydriver.dto.RepositoryCollectRequest;
 import org.jboss.pnc.api.repositorydriver.dto.RepositoryCreateRequest;
 import org.jboss.pnc.api.repositorydriver.dto.RepositoryCreateResponse;
 import org.jboss.pnc.api.repositorydriver.dto.RepositoryPromoteRequest;
 import org.jboss.pnc.api.repositorydriver.dto.RepositoryPromoteResult;
+import org.jboss.pnc.api.repositorydriver.dto.RepositorySealRequest;
 import org.jboss.pnc.repositorydriver.Driver;
 import org.jboss.pnc.repositorydriver.RepositoryDriverException;
 import org.slf4j.Logger;
@@ -66,6 +70,14 @@ public class Public {
         return driver.create(repositoryCreateRequest);
     }
 
+    @Authenticated
+    @PUT
+    @Path("/seal")
+    public void seal(RepositorySealRequest promoteRequest) throws RepositoryDriverException {
+        logger.info("Requested promotion: {}", promoteRequest.getBuildContentId());
+        driver.seal(promoteRequest);
+    }
+
     /**
      * Retrieves the tracking report from Indy and promotes the repository. The endpoint returns after tracking report
      * retrieval, if the retrieval fails and error response is returned. The promotion is an async operation, the result
@@ -74,9 +86,17 @@ public class Public {
     @Authenticated
     @PUT
     @Path("/promote")
-    public void promote(RepositoryPromoteRequest promoteRequest) throws RepositoryDriverException {
+    public void promote(RepositoryPromoteRequest promoteRequest, @QueryParam("seal") @DefaultValue("false") boolean seal) throws RepositoryDriverException {
         logger.info("Requested promotion: {}", promoteRequest.getBuildContentId());
-        driver.promote(promoteRequest);
+        driver.promote(seal, promoteRequest);
+    }
+
+    @Authenticated
+    @POST
+    @Path("/archive")
+    public void archive(ArchiveRequest archiveRequest) throws RepositoryDriverException {
+        logger.info("Requested archival: {}", archiveRequest.getBuildContentId());
+        driver.archive(archiveRequest);
     }
 
     /**

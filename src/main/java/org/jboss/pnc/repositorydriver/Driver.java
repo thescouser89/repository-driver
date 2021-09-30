@@ -59,6 +59,7 @@ import org.jboss.pnc.api.repositorydriver.dto.RepositoryCreateRequest;
 import org.jboss.pnc.api.repositorydriver.dto.RepositoryCreateResponse;
 import org.jboss.pnc.api.repositorydriver.dto.RepositoryPromoteRequest;
 import org.jboss.pnc.api.repositorydriver.dto.RepositoryPromoteResult;
+import org.jboss.pnc.api.repositorydriver.dto.RepositorySealRequest;
 import org.jboss.pnc.common.log.ProcessStageUtils;
 import org.jboss.pnc.repositorydriver.runtime.ApplicationLifecycle;
 import org.slf4j.Logger;
@@ -144,18 +145,22 @@ public class Driver {
         return new RepositoryCreateResponse(downloadsUrl, deployUrl);
     }
 
-    /**
-     * Retrieve tracking report from repository manager. Add each tracked download to the dependencies of the build
-     * result. Add each tracked upload to the built artifacts of the build result. Promote uploaded artifacts to the
-     * product-level storage. Finally delete the group associated with the completed build.
-     */
-    public void promote(RepositoryPromoteRequest promoteRequest) throws RepositoryDriverException {
+    public void seal(RepositorySealRequest request) throws RepositoryDriverException {
         if (lifecycle.isShuttingDown()) {
             throw new StoppingException();
         }
-        String buildContentId = promoteRequest.getBuildContentId();
-        BuildType buildType = promoteRequest.getBuildType();
-        TrackedContentDTO report = retrieveTrackingReport(buildContentId, true);
+        String buildContentId = request.getBuildContentId();
+        BuildType buildType = request.getBuildType();
+
+        try {
+            sealTrackingReport(buildContentId);
+        } catch (IndyClientException e) {
+            logger.debug("Failed to retrieve Indy client module for the artifact tracker");
+            throw new RepositoryDriverException(
+                    "Failed to retrieve Indy client module for the artifact tracker: %s",
+                    e,
+                    e.getMessage());
+        }
 
         // fire and forget
         executor.runAsync(() -> {
@@ -166,6 +171,29 @@ public class Driver {
                 logger.error("Failed to delete build group.", e);
             }
         });
+    }
+
+    /**
+     * Retrieve tracking report from repository manager. Add each tracked download to the dependencies of the build
+     * result. Add each tracked upload to the built artifacts of the build result. Promote uploaded artifacts to the
+     * product-level storage. Finally delete the group associated with the completed build.
+     */
+    public void promote(boolean seal, RepositoryPromoteRequest promoteRequest) throws RepositoryDriverException {
+        // TODO remove once BPM transitions into a split promotion process
+        if (seal) {
+            seal(
+                    RepositorySealRequest.builder()
+                            .buildType(promoteRequest.getBuildType())
+                            .buildContentId(promoteRequest.getBuildContentId())
+                            .build());
+        }
+
+        if (lifecycle.isShuttingDown()) {
+            throw new StoppingException();
+        }
+        String buildContentId = promoteRequest.getBuildContentId();
+        BuildType buildType = promoteRequest.getBuildType();
+        TrackedContentDTO report = retrieveTrackingReport(buildContentId, false);
 
         // removeActivePromotion is called as the last step of Driver#notifyInvoker
         lifecycle.addActivePromotion();
@@ -659,13 +687,7 @@ public class Driver {
         TrackedContentDTO report;
         try {
             if (seal) {
-                userLog.info("Sealing tracking record");
-                boolean sealed = foloAdmin.sealTrackingRecord(buildContentId);
-                if (!sealed) {
-                    throw new RepositoryDriverException(
-                            "Failed to seal content-tracking record for: %s.",
-                            buildContentId);
-                }
+                sealTrackingReport(buildContentId, foloAdmin);
             }
             userLog.info("Getting tracking report");
             report = foloAdmin.getTrackingReport(buildContentId);
@@ -680,6 +702,29 @@ public class Driver {
             throw new RepositoryDriverException("Failed to retrieve tracking report for: %s.", buildContentId);
         }
         return report;
+    }
+
+    private void sealTrackingReport(String buildContentId) throws IndyClientException, RepositoryDriverException {
+        IndyFoloAdminClientModule foloAdmin;
+        try {
+            foloAdmin = indy.module(IndyFoloAdminClientModule.class);
+        } catch (IndyClientException e) {
+            throw new RepositoryDriverException(
+                    "Failed to retrieve Indy client module for the artifact tracker: %s",
+                    e,
+                    e.getMessage());
+        }
+
+        sealTrackingReport(buildContentId, foloAdmin);
+    }
+
+    private void sealTrackingReport(String buildContentId, IndyFoloAdminClientModule foloAdmin)
+            throws IndyClientException, RepositoryDriverException {
+        userLog.info("Sealing tracking record");
+        boolean sealed = foloAdmin.sealTrackingRecord(buildContentId);
+        if (!sealed) {
+            throw new RepositoryDriverException("Failed to seal content-tracking record for: %s.", buildContentId);
+        }
     }
 
     private Function<HttpResponse<String>, HttpResponse<String>> validateResponse() {
