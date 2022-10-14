@@ -324,7 +324,7 @@ public class TrackingReportProcessor {
      */
     private String computePurl(final TrackedContentEntryDTO transfer) {
         String purl = null;
-
+        logger.info(">>>> package type: '{}', path: '{}'", transfer.getStoreKey().getPackageType(), transfer.getPath());
         try {
             switch (transfer.getStoreKey().getPackageType()) {
                 case MAVEN_PKG_KEY:
