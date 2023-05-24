@@ -16,6 +16,7 @@ import javax.inject.Inject;
 import javax.validation.ConstraintViolation;
 import javax.validation.Validator;
 
+import io.quarkus.logging.Log;
 import org.apache.commons.lang.StringUtils;
 import org.commonjava.atlas.maven.ident.ref.ArtifactRef;
 import org.commonjava.atlas.maven.ident.ref.SimpleArtifactRef;
@@ -139,14 +140,19 @@ public class TrackingReportProcessor {
 
         Set<TrackedContentEntryDTO> uploads = report.getUploads();
         if (uploads == null) {
+            Log.info("uploads is null!?");
             return Collections.emptyList();
         }
+        Log.info("Size of uploads: " + uploads.size());
+
         List<RepositoryArtifact> artifacts = new ArrayList<>(uploads.size());
         for (TrackedContentEntryDTO upload : uploads) {
             String path = upload.getPath();
+            Log.info("Processing: " + path);
             StoreKey storeKey = upload.getStoreKey();
 
             if (artifactFilter.acceptsForData(upload)) {
+                Log.info(path + " is accepted");
                 String identifier = computeIdentifier(upload);
                 String purl = computePurl(upload);
 
@@ -169,6 +175,8 @@ public class TrackingReportProcessor {
                         .build();
 
                 artifacts.add(validateArtifact(artifact));
+            } else {
+                Log.info(path + " is rejected");
             }
         }
         return artifacts;
