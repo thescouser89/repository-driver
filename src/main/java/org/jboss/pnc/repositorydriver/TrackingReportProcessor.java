@@ -1,11 +1,20 @@
 package org.jboss.pnc.repositorydriver;
 
-import io.opentelemetry.instrumentation.annotations.SpanAttribute;
-import io.opentelemetry.instrumentation.annotations.WithSpan;
+import java.io.File;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
-import com.github.packageurl.MalformedPackageURLException;
-import com.github.packageurl.PackageURL;
-import com.github.packageurl.PackageURLBuilder;
+import javax.enterprise.context.ApplicationScoped;
+import javax.inject.Inject;
+import javax.validation.ConstraintViolation;
+import javax.validation.Validator;
 
 import org.apache.commons.lang.StringUtils;
 import org.commonjava.atlas.maven.ident.ref.ArtifactRef;
@@ -25,31 +34,15 @@ import org.jboss.pnc.api.enums.RepositoryType;
 import org.jboss.pnc.api.repositorydriver.dto.RepositoryArtifact;
 import org.jboss.pnc.api.repositorydriver.dto.TargetRepository;
 import org.jboss.pnc.common.Strings;
-import org.jboss.pnc.repositorydriver.artifactfilter.ArtifactFilter;
-import org.jboss.pnc.repositorydriver.artifactfilter.ArtifactFilterArchive;
-import org.jboss.pnc.repositorydriver.artifactfilter.ArtifactFilterDatabase;
-import org.jboss.pnc.repositorydriver.artifactfilter.ArtifactFilterPromotion;
-import org.jboss.pnc.repositorydriver.artifactfilter.PatternsList;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import javax.annotation.PostConstruct;
-import javax.enterprise.context.ApplicationScoped;
-import javax.inject.Inject;
-import javax.validation.ConstraintViolation;
-import javax.validation.Validator;
+import com.github.packageurl.MalformedPackageURLException;
+import com.github.packageurl.PackageURL;
+import com.github.packageurl.PackageURLBuilder;
 
-import java.io.File;
-import java.time.Instant;
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.Collections;
-import java.util.Comparator;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
-import java.util.regex.Pattern;
+import io.opentelemetry.instrumentation.annotations.SpanAttribute;
+import io.opentelemetry.instrumentation.annotations.WithSpan;
 
 import static org.commonjava.indy.model.core.GenericPackageTypeDescriptor.GENERIC_PKG_KEY;
 import static org.commonjava.indy.pkg.maven.model.MavenPackageTypeDescriptor.MAVEN_PKG_KEY;
@@ -69,13 +62,7 @@ public class TrackingReportProcessor {
     public final static String MAVEN_SUBSTITUTE_EXTENSION = ".empty";
 
     @Inject
-    ArtifactFilterArchive artifactFilterArchive;
-
-    @Inject
-    ArtifactFilterDatabase artifactFilterDatabase;
-
-    @Inject
-    ArtifactFilterPromotion artifactFilterPromotion;
+    ArtifactFilter artifactFilter;
 
     @Inject
     Validator validator;
@@ -86,21 +73,9 @@ public class TrackingReportProcessor {
     @Inject
     IndyContentClientModule indyContentModule;
 
-    private PatternsList ignoredRepoPatterns;
-
-    @PostConstruct
-    public void init() {
-        if (configuration.getIgnoredRepoPatterns().isPresent()) {
-            ignoredRepoPatterns = new PatternsList(configuration.getIgnoredRepoPatterns().get());
-        } else {
-            ignoredRepoPatterns = new PatternsList(Collections.emptyList());
-        }
-    }
-
     @WithSpan()
     public List<RepositoryArtifact> collectDownloadedArtifacts(
-            @SpanAttribute(value = "report") TrackedContentDTO report,
-            @SpanAttribute(value = "filter") ArtifactFilter filter) throws RepositoryDriverException {
+            @SpanAttribute(value = "report") TrackedContentDTO report) throws RepositoryDriverException {
         Set<TrackedContentEntryDTO> downloads = report.getDownloads();
         if (downloads == null) {
             return Collections.emptyList();
@@ -108,7 +83,7 @@ public class TrackingReportProcessor {
 
         List<RepositoryArtifact> deps = new ArrayList<>(downloads.size());
         for (TrackedContentEntryDTO download : downloads) {
-            if (filter.accepts(download)) {
+            if (artifactFilter.acceptsForData(download)) {
                 String path = download.getPath();
                 StoreKey storeKey = download.getStoreKey();
                 String identifier = computeIdentifier(download);
@@ -125,7 +100,7 @@ public class TrackingReportProcessor {
                 TargetRepository targetRepository = getDownloadsTargetRepository(download);
 
                 // ignored dependency sources for promotion are the internal ones, so those artifacts are built inhouse
-                ArtifactQuality quality = ignoreDependencySource(storeKey) ? ArtifactQuality.NEW
+                ArtifactQuality quality = artifactFilter.ignoreDependencySource(storeKey) ? ArtifactQuality.NEW
                         : ArtifactQuality.IMPORTED;
                 RepositoryArtifact.Builder artifactBuilder = RepositoryArtifact.builder()
                         .md5(download.getMd5())
@@ -150,35 +125,6 @@ public class TrackingReportProcessor {
     }
 
     /**
-     * Checks if given store is ignored for dependencies promotion.
-     *
-     * @param storeKey evaluated store key
-     * @return true if the given store is ignored, false otherwise
-     */
-    private boolean ignoreDependencySource(StoreKey storeKey) {
-        String strSK = storeKey.toString();
-        return matchesOne(strSK, ignoredRepoPatterns);
-    }
-
-    /**
-     * Checks if the given string matches one of the patterns.
-     *
-     * @param string the string
-     * @param patterns the patterns list
-     * @return true if there is a matching pattern, false otherwise
-     */
-    private boolean matchesOne(String string, PatternsList patterns) {
-        if (patterns != null) {
-            for (Pattern pattern : patterns.getPatterns()) {
-                if (pattern.matcher(string).matches()) {
-                    return true;
-                }
-            }
-        }
-        return false;
-    }
-
-    /**
      * Return list of output artifacts for promotion.
      *
      * @return List of output artifacts meta data
@@ -200,7 +146,7 @@ public class TrackingReportProcessor {
             String path = upload.getPath();
             StoreKey storeKey = upload.getStoreKey();
 
-            if (artifactFilterDatabase.accepts(upload)) {
+            if (artifactFilter.acceptsForData(upload)) {
                 String identifier = computeIdentifier(upload);
                 String purl = computePurl(upload);
 
@@ -242,7 +188,7 @@ public class TrackingReportProcessor {
             String path = download.getPath();
             StoreKey source = download.getStoreKey();
             String packageType = source.getPackageType();
-            if (!ignoreDependencySource(source) && artifactFilterPromotion.accepts(download)) {
+            if (artifactFilter.acceptsForPromotion(download, true)) {
                 StoreKey target;
                 // this has not been captured, so promote it.
                 switch (packageType) {
@@ -271,18 +217,21 @@ public class TrackingReportProcessor {
     @WithSpan()
     public List<ArchiveDownloadEntry> collectArchivalArtifacts(
             @SpanAttribute(value = "report") TrackedContentDTO report) throws RepositoryDriverException {
-        Set<TrackedContentEntryDTO> downloads = report.getDownloads();
+        List<RepositoryArtifact> downloads = collectDownloadedArtifacts(report);
         if (downloads == null) {
             return Collections.emptyList();
         }
 
         List<ArchiveDownloadEntry> deps = new ArrayList<>(downloads.size());
-        for (TrackedContentEntryDTO download : downloads) {
-            if (artifactFilterArchive.accepts(download)) {
-                TargetRepository targetRepository = getDownloadsTargetRepository(download);
-                ArchiveDownloadEntry entry = fromTrackedContentEntry(download, targetRepository);
-                deps.add(entry);
+        for (RepositoryArtifact download : downloads) {
+            if (download.getTargetRepository().getRepositoryType() == RepositoryType.GENERIC_PROXY) {
+                // Don't archive GENERIC_PROXY artifacts
+                break;
             }
+
+            ArchiveDownloadEntry entry = fromTrackedContentEntry(download);
+            deps.add(entry);
+
         }
         deps.sort(Comparator.comparing(ArchiveDownloadEntry::getStoreKey));
         return deps;
@@ -301,7 +250,8 @@ public class TrackingReportProcessor {
         }
         for (TrackedContentEntryDTO upload : uploads) {
             String path = upload.getPath();
-            if (artifactFilterPromotion.accepts(upload)) {
+            StoreKey storeKey = upload.getStoreKey();
+            if (artifactFilter.acceptsForPromotion(upload, false)) {
                 String packageType = TypeConverters.getIndyPackageTypeKey(repositoryType);
                 StoreKey source = new StoreKey(packageType, StoreType.hosted, buildContentId);
                 StoreKey target = new StoreKey(packageType, StoreType.hosted, getBuildPromotionTarget(tempBuild));
@@ -546,7 +496,7 @@ public class TrackingReportProcessor {
         String result;
         StoreKey sk = download.getStoreKey();
         String packageType = sk.getPackageType();
-        if (ignoreDependencySource(sk)) {
+        if (artifactFilter.ignoreDependencySource(sk)) {
             result = "/api/" + content.contentPath(sk);
         } else {
             result = "/api/" + content.contentPath(new StoreKey(packageType, StoreType.hosted, SHARED_IMPORTS_ID));

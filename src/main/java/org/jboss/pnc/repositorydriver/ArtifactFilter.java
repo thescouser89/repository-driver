@@ -15,18 +15,36 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.jboss.pnc.repositorydriver.artifactfilter;
+package org.jboss.pnc.repositorydriver;
 
 import org.commonjava.indy.folo.dto.TrackedContentEntryDTO;
+import org.commonjava.indy.model.core.StoreKey;
 
 public interface ArtifactFilter {
 
     /**
-     * Checks if the artifact should be accepted or not.
+     * Checks if the artifact should be promoted or not.
      *
      * @param artifact the audited artifact
-     * @return true if the artifact should be accepted, false otherwise
+     * @param download flag if it is download or upload
+     * @return true if the artifact should be part of promotion, false otherwise
      */
-    boolean accepts(TrackedContentEntryDTO artifact);
+    boolean acceptsForPromotion(TrackedContentEntryDTO artifact, boolean download);
+
+    /**
+     * Checks if the artifact should be stored in the database.
+     *
+     * @param artifact the audited artifact
+     * @return true if it should be stored, false otherwise
+     */
+    boolean acceptsForData(TrackedContentEntryDTO artifact);
+
+    /**
+     * Checks if given store is ignored for dependencies promotion.
+     *
+     * @param storeKey evaluated store key
+     * @return true if the given store is ignored, false otherwise
+     */
+    boolean ignoreDependencySource(StoreKey storeKey);
 
 }
