@@ -605,6 +605,7 @@ public class Driver {
                 // brew pull: see MMENG-1262
                 .addMetadata(BREW_PULL_METADATA_KEY, Boolean.toString(brewPullActive))
                 .build();
+        logger.info("Brew pull active is: " + brewPullActive);
 
         String changelog = "Creating repository group for resolving artifacts (repo: " + buildContentId + ").";
         logger.info(changelog);
