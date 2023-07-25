@@ -139,6 +139,7 @@ public class Driver {
         BuildType buildType = repositoryCreateRequest.getBuildType();
         String packageType = TypeConverters.getIndyPackageTypeKey(buildType.getRepoType());
         String buildId = repositoryCreateRequest.getBuildContentId();
+        logger.info("[1] Brew pull active: " + repositoryCreateRequest.isBrewPullActive());
 
         try {
             setupBuildRepos(
@@ -605,7 +606,8 @@ public class Driver {
                 // brew pull: see MMENG-1262
                 .addMetadata(BREW_PULL_METADATA_KEY, Boolean.toString(brewPullActive))
                 .build();
-        logger.info("Brew pull active is: " + brewPullActive);
+        logger.info("[2] Brew pull active is: " + brewPullActive);
+        logger.info("[3] {}", buildGroup);
 
         String changelog = "Creating repository group for resolving artifacts (repo: " + buildContentId + ").";
         logger.info(changelog);
