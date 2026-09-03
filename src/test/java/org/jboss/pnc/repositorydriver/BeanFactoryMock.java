@@ -23,6 +23,11 @@ public class BeanFactoryMock extends BeanFactory {
 
     @Produces
     Indy createIndyServiceAccountClient() {
+        return newIndyServiceAccountClient();
+    }
+
+    @Override
+    public Indy newIndyServiceAccountClient() {
         IndyClientModule[] indyModules = new IndyClientModule[] {
                 new IndyMock.IndyFoloAdminClientModuleMock(),
                 new IndyMock.IndyFoloContentClientModuleMock(),

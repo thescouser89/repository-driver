@@ -135,6 +135,9 @@ public class Driver {
     Indy indy;
 
     @Inject
+    BeanFactory beanFactory;
+
+    @Inject
     ApplicationLifecycle lifecycle;
 
     @Inject
@@ -240,13 +243,19 @@ public class Driver {
         BuildCategory buildCategory = promoteRequest.getBuildCategory();
         TrackedContentDTO report;
         try {
-            report = retrieveTrackingReport(buildContentId);
+            report = retrieveTrackingReport(buildContentId, indy);
         } catch (RepositoryDriverException ex) {
             userLog.error(ex.getMessage());
             uploadLogs(ex.getMessage(), "promote");
             throw ex;
         }
         Set<StoreKey> genericRepos = new HashSet<>();
+
+        // The promotion runs asynchronously, after this request (and thus the request-scoped injected Indy client)
+        // has been disposed. It therefore needs its own client whose lifecycle it controls; the injected client's
+        // connection pool would already be shut down. Create it on the request thread so it captures the correct
+        // per-request MDC context, and close it in the terminal stage of the pipeline below.
+        final Indy promotionIndy = beanFactory.newIndyServiceAccountClient();
 
         // removeActivePromotion is called as the last step of Driver#notifyInvoker
         lifecycle.addActivePromotion();
@@ -293,7 +302,7 @@ public class Driver {
                     // the promotion is done only after a successfully collected downloads and uploads
                     PromotionPaths downloadsPromotions = trackingReportProcessor
                             .collectDownloadsPromotions(report, genericRepos);
-                    promoteDownloads(downloadsPromotions, promoteRequest.isTempBuild(), buildContentId);
+                    promoteDownloads(downloadsPromotions, promoteRequest.isTempBuild(), buildContentId, promotionIndy);
                     promoteUploads(
                             trackingReportProcessor.collectUploadsPromotions(
                                     report,
@@ -302,7 +311,8 @@ public class Driver {
                                     buildCategory,
                                     buildContentId),
                             promoteRequest.isTempBuild(),
-                            buildContentId);
+                            buildContentId,
+                            promotionIndy);
                 } catch (RepositoryDriverException e) {
                     String message = "Failed promoting downloaded or uploaded artifacts: ";
                     userLog.error(message, e);
@@ -350,11 +360,30 @@ public class Driver {
                         "Deleting build group {} {} and the generic http repositories...",
                         buildType.getRepoType(),
                         buildContentId);
-                deleteBuildRepos(buildType.getRepoType(), buildContentId, genericRepos);
+                deleteBuildRepos(buildType.getRepoType(), buildContentId, genericRepos, promotionIndy);
             } catch (Throwable e) {
                 logger.error("Failed to delete build group.", e);
             }
         })).handle(Context.current().wrapFunction((nul, throwable) -> {
+            try {
+                completePromotion(throwable, buildConfigurationId, buildContentId, promotionIndy);
+            } finally {
+                // The promotion pipeline is done; close the client it owned so its connection-eviction thread does
+                // not leak. Nothing that runs after this stage uses the Indy client (notifyInvoker uses httpClient).
+                if (promotionIndy != null) {
+                    promotionIndy.close();
+                }
+            }
+            return null;
+        }));
+    }
+
+    private void completePromotion(
+            Throwable throwable,
+            String buildConfigurationId,
+            String buildContentId,
+            Indy promotionIndy) {
+        try {
             if (throwable != null) {
                 logger.error("Unhanded promotion exception.", throwable);
             } else {
@@ -386,7 +415,7 @@ public class Driver {
 
                         // put the span into the current Context
                         try (Scope scope = span.makeCurrent()) {
-                            archive(archiveRequest);
+                            archive(archiveRequest, promotionIndy);
                         } finally {
                             span.end(); // closing the scope does not end the span, this has to be done manually
                         }
@@ -400,9 +429,9 @@ public class Driver {
                     }
                 }
             }
+        } finally {
             lifecycle.removeActivePromotion();
-            return null;
-        }));
+        }
     }
 
     private void uploadLogs(String message, String operation) {
@@ -424,8 +453,11 @@ public class Driver {
     @WithSpan()
     public void archive(@SpanAttribute(value = "archiveRequest") ArchiveRequest request)
             throws RepositoryDriverException {
+        archive(request, indy);
+    }
 
-        TrackedContentDTO report = retrieveTrackingReport(request.getBuildContentId());
+    private void archive(ArchiveRequest request, Indy indy) throws RepositoryDriverException {
+        TrackedContentDTO report = retrieveTrackingReport(request.getBuildContentId(), indy);
         doArchive(request, report);
     }
 
@@ -615,7 +647,7 @@ public class Driver {
             @SpanAttribute(value = "buildContentId") String buildContentId,
             @SpanAttribute(value = "tempBuild") boolean tempBuild,
             @SpanAttribute(value = "buildCategory") BuildCategory buildCategory) throws RepositoryDriverException {
-        TrackedContentDTO report = retrieveTrackingReport(buildContentId);
+        TrackedContentDTO report = retrieveTrackingReport(buildContentId, indy);
         try {
             List<RepositoryArtifact> downloadedArtifacts = trackingReportProcessor
                     .collectDownloadedArtifacts(report, artifactFilterDatabase);
@@ -726,8 +758,11 @@ public class Driver {
      * @throws RepositoryDriverException in case of an unexpected error during promotion
      * @throws PromotionValidationException when the promotion process results in an error due to validation failure
      */
-    private void promoteDownloads(PromotionPaths promotionPaths, boolean tempBuild, String promotionTrackingId)
-            throws RepositoryDriverException, PromotionValidationException {
+    private void promoteDownloads(
+            PromotionPaths promotionPaths,
+            boolean tempBuild,
+            String promotionTrackingId,
+            Indy indy) throws RepositoryDriverException, PromotionValidationException {
         // Promote all build dependencies NOT ALREADY CAPTURED to the hosted repository holding store for the shared
         // imports
         for (SourceTargetPaths sourceTargetPaths : promotionPaths.getSourceTargetsPaths()) {
@@ -745,7 +780,7 @@ public class Driver {
                     request.getPaths().size(),
                     request.getSource(),
                     request.getTarget());
-            doPromoteByPath(request, false, readonly);
+            doPromoteByPath(request, false, readonly, indy);
         }
     }
 
@@ -757,8 +792,11 @@ public class Driver {
      *         in transport
      * @throws PromotionValidationException when the promotion process results in an error due to validation failure
      */
-    private void promoteUploads(PromotionPaths promotionPaths, boolean tempBuild, String promotionTrackingID)
-            throws RepositoryDriverException, PromotionValidationException {
+    private void promoteUploads(
+            PromotionPaths promotionPaths,
+            boolean tempBuild,
+            String promotionTrackingID,
+            Indy indy) throws RepositoryDriverException, PromotionValidationException {
         for (SourceTargetPaths sourceTargetPaths : promotionPaths.getSourceTargetsPaths()) {
             PathsPromoteRequest request = new PathsPromoteRequest(
                     sourceTargetPaths.getSource(),
@@ -770,7 +808,7 @@ public class Driver {
                     request.getPaths().size(),
                     request.getSource(),
                     request.getTarget());
-            doPromoteByPath(request, !tempBuild, false);
+            doPromoteByPath(request, !tempBuild, false, indy);
         }
     }
 
@@ -787,7 +825,7 @@ public class Driver {
      *         transport
      * @throws PromotionValidationException when the promotion process results in an error due to validation failure
      */
-    private void doPromoteByPath(PathsPromoteRequest req, boolean setSourceRO, boolean setTargetRO)
+    private void doPromoteByPath(PathsPromoteRequest req, boolean setSourceRO, boolean setTargetRO, Indy indy)
             throws RepositoryDriverException, PromotionValidationException {
         IndyPromoteClientModule promoter;
         try {
@@ -803,10 +841,10 @@ public class Driver {
             PathsPromoteResult result = promoter.promoteByPath(req);
             if (result.succeeded()) {
                 if (setSourceRO) {
-                    setHostedReadOnly(req.getSource(), promoter, result);
+                    setHostedReadOnly(req.getSource(), promoter, result, indy);
                 }
                 if (setTargetRO) {
-                    setHostedReadOnly(req.getTarget(), promoter, result);
+                    setHostedReadOnly(req.getTarget(), promoter, result, indy);
                 }
             } else {
                 String error = getValidationError(result);
@@ -827,7 +865,7 @@ public class Driver {
      * @throws IndyClientException in case the repo data cannot be loaded
      * @throws RepositoryDriverException in case the repo update fails
      */
-    private void setHostedReadOnly(StoreKey key, IndyPromoteClientModule promoter, PathsPromoteResult result)
+    private void setHostedReadOnly(StoreKey key, IndyPromoteClientModule promoter, PathsPromoteResult result, Indy indy)
             throws IndyClientException, RepositoryDriverException {
         HostedRepository hosted = indy.stores().load(key, HostedRepository.class);
         hosted.setReadonly(true);
@@ -910,7 +948,8 @@ public class Driver {
     private void deleteBuildRepos(
             RepositoryType repositoryType,
             String buildContentId,
-            Collection<StoreKey> genericRepos) throws RepositoryDriverException {
+            Collection<StoreKey> genericRepos,
+            Indy indy) throws RepositoryDriverException {
         try {
             String packageType = TypeConverters.getIndyPackageTypeKey(repositoryType);
             StoreKey key = new StoreKey(packageType, StoreType.group, buildContentId);
@@ -1057,7 +1096,8 @@ public class Driver {
         }
     }
 
-    private TrackedContentDTO retrieveTrackingReport(String buildContentId) throws RepositoryDriverException {
+    private TrackedContentDTO retrieveTrackingReport(String buildContentId, Indy indy)
+            throws RepositoryDriverException {
         IndyFoloAdminClientModule foloAdmin;
         try {
             foloAdmin = indy.module(IndyFoloAdminClientModule.class);
